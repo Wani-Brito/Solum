@@ -1,43 +1,62 @@
 from datetime import date, datetime
 import os
-from typing import Optional
-from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import create_engine, Column, Integer, String, DECIMAL, Date, DateTime, Text, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
 import re
+from typing import Optional
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import Column, Date, DateTime, DECIMAL, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import Session, sessionmaker
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    senha: str
+    senha: str = Field(..., min_length=8)
+
 
 # --- CONFIGURAÇÃO DE CRIPTOGRAFIA DE PALAVRAS-PASSE ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 def hash_senha(senha: str) -> str:
     """Gera o hash seguro da palavra-passe."""
     return pwd_context.hash(senha)
 
+
 def verificar_senha(senha_informada: str, senha_hash: str) -> bool:
     """Verifica se a palavra-passe informada corresponde ao hash guardado."""
     return pwd_context.verify(senha_informada, senha_hash)
 
-# --- 1. CONFIGURAÇÃO DO BANCO DE DADOS (NEON POSTGRESQL) ---
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("Configure the DATABASE_URL environment variable before starting Solum.")
 
-engine = create_engine(DATABASE_URL)
+# --- 1. CONFIGURAÇÃO DO BANCO DE DADOS ---
+DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite:///./solum.db"
+
+engine_kwargs = {"connect_args": {"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 app = FastAPI(
-    title="Solum Backend Completo - PostgreSQL (Neon)",
-    description="Backend oficial estruturado para o sistema Solum[cite: 1].",
-    version="1.0"
+    title="Solum Backend",
+    description="Backend do sistema Solum para gestão financeira, impostos e investimentos.",
+    version="1.1.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def startup_event():
+    Base.metadata.create_all(bind=engine)
 
 # --- 2. MODELOS SQLALCHEMY (Espelho exato de todas as tabelas do banco) ---
 
@@ -300,11 +319,11 @@ class MetaFinanceiraModel(Base):
 
 # --- 3. SCHEMAS PYDANTIC (Validação de Entrada) ---
 class UsuarioCreate(BaseModel):
-    nome: str
+    nome: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
-    senha: str
+    senha: str = Field(..., min_length=8)
     telefone: Optional[str] = None
-    tipo_usuario: str
+    tipo_usuario: str = Field(..., min_length=2, max_length=50)
 
 class TransacaoCreate(BaseModel):
     id_usuario: int
@@ -332,14 +351,25 @@ class SuavizacaoRequest(BaseModel):
 # --- 5. ROTAS DA API ---
 @app.get("/")
 def read_root():
-    return {"message": "API do Solum integrada ao PostgreSQL (Neon) a funcionar!", "status": "online"}
+    return {"message": "API do Solum funcionando corretamente!", "status": "online"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "database": DATABASE_URL}
+
 
 @app.post("/usuarios/", status_code=201)
 def criar_usuario(usuario: UsuarioCreate, db: Session = Depends(get_db)):
+    email_normalizado = str(usuario.email).lower().strip()
+    usuario_existente = db.query(UsuarioModel).filter(UsuarioModel.email == email_normalizado).first()
+    if usuario_existente:
+        raise HTTPException(status_code=400, detail="Este e-mail já está registado no sistema.")
+
     db_usuario = UsuarioModel(
-        nome=usuario.nome,
-        email=usuario.email,
-        senha=usuario.senha,
+        nome=usuario.nome.strip(),
+        email=email_normalizado,
+        senha=hash_senha(usuario.senha),
         telefone=usuario.telefone,
         tipo_usuario=usuario.tipo_usuario.upper()
     )
